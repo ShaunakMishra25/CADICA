@@ -1,0 +1,39 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+env/
+
+# Tooling caches
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+# Raw data (not distributed with the repository)
+data/raw/
+
+# Generated fold splits (regenerate with `make pipeline`)
+data/folds/train_fold_*.csv
+data/folds/val_fold_*.csv
+
+# Model artifacts and experiment outputs
+checkpoints/*
+!checkpoints/.gitkeep
+results/*
+!results/.gitkeep
+*.pt
+*.pth
+*.ckpt
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
