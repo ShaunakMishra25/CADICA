@@ -4,9 +4,9 @@ A reproducible research pipeline for classifying coronary artery stenosis severi
 coronary angiographic video frames in the CADICA dataset: a patient-level, three-class
 benchmark built with PyTorch.
 
-> **Status:** data preparation, sampling, patient-level cross-validation, dataset, and
-> baseline model are implemented and tested. A three-class training/evaluation CLI is the
-> next milestone (see [Roadmap](#roadmap)).
+> **Status:** data preparation, sampling, patient-level cross-validation, dataset,
+> baseline model, and a three-class training/evaluation CLI are implemented and tested.
+> See [Roadmap](#roadmap) for planned extensions.
 
 ---
 
@@ -138,6 +138,43 @@ splits.
 
 ---
 
+## Train a fold
+
+```bash
+cadica-train --fold 1 --epochs 10 --batch-size 16
+```
+
+The trainer:
+
+- loads `data/folds/train_fold_<k>.csv` and `data/folds/val_fold_<k>.csv`;
+- balances classes **and** patients with `WeightedRandomSampler`;
+- averages frame probabilities per patient before scoring;
+- reports patient-level accuracy, balanced accuracy, macro F1, a confusion matrix, and a
+  per-class classification report;
+- writes outputs to the ignored `results/` and `checkpoints/` directories.
+
+| Output                                      | Description                              |
+| ------------------------------------------- | ---------------------------------------- |
+| `results/training_log_fold_<k>.csv`         | Per-epoch training loss                  |
+| `results/patient_predictions_fold_<k>.csv`  | Patient-level predictions and probabilities |
+| `checkpoints/baseline_fold_<k>.pt`          | Model and optimizer state                |
+
+Useful options: `--lr`, `--num-workers`, and `--device cpu` or `--device cuda`.
+
+You can also run the module directly:
+
+```bash
+python -m cadica.cli.train --fold 1 --epochs 10
+```
+
+Or through Make:
+
+```bash
+make train FOLD=1 EPOCHS=10
+```
+
+---
+
 ## Python API
 
 ```python
@@ -192,7 +229,7 @@ files are unavailable, so the suite also runs on a clean checkout.
 
 ## Reproducibility notes
 
-- **Seed:** `42` for fold generation and future training runs.
+- **Seed:** `42` for fold generation and training runs.
 - **Split unit:** patient. `cadica-verify-folds` asserts that train and validation patient
   sets are disjoint for every fold.
 - **Sampling:** `round(i * (n - 1) / (k - 1))` for `i = 0..k-1`, where `k = min(8, n)`.
@@ -206,9 +243,9 @@ details.
 
 ## Roadmap
 
-- [ ] Three-class training and evaluation CLI with per-class metrics, confusion matrix,
-      and checkpoint selection.
-- [ ] Optional augmentation and class-balanced sampling.
+- [x] Three-class training and evaluation CLI with per-class metrics, confusion matrix,
+      and checkpointing.
+- [ ] Optional augmentation and additional imbalance-handling strategies.
 - [ ] Video-level models (temporal pooling or 3D CNN) instead of independent frames.
 - [ ] Probability calibration and threshold analysis for clinical operating points.
 - [ ] Experiment tracking and figure generation.

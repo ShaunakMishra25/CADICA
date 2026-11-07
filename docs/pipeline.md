@@ -81,18 +81,39 @@ Generated split files are ignored by Git because they are fully reproducible wit
 `make pipeline`. The small patient fold table and the relative-path sampling manifest are
 tracked for convenience.
 
-## Adding a training stage
+## Stage 6 — Train a fold
 
-The dataset and model are ready to consume the split manifests:
-
-```python
-from cadica.data import CADICADataset
-from cadica.models import CADICACNN
-
-train_dataset = CADICADataset("data/folds/train_fold_1.csv")
-val_dataset = CADICADataset("data/folds/val_fold_1.csv")
-model = CADICACNN(num_classes=3)
+```bash
+cadica-train --fold 1 --epochs 10 --batch-size 16
 ```
 
-Recommended next steps: class-weighted cross-entropy, patient-level metric aggregation,
-and checkpoint selection on validation macro F1 or balanced accuracy.
+The trainer reads the fold manifests, balances classes and patients with a
+`WeightedRandomSampler`, and evaluates at the patient level by averaging frame
+probabilities per patient.
+
+- **Inputs:** `data/folds/train_fold_<k>.csv`, `data/folds/val_fold_<k>.csv`
+- **Outputs:**
+  - `results/training_log_fold_<k>.csv`
+  - `results/patient_predictions_fold_<k>.csv`
+  - `checkpoints/baseline_fold_<k>.pt`
+
+Reported metrics: patient-level accuracy, balanced accuracy, macro F1, confusion matrix,
+and a per-class classification report.
+
+Equivalent module invocation:
+
+```bash
+python -m cadica.cli.train --fold 1 --epochs 10
+```
+
+## Design notes
+
+- **Patient-level evaluation.** Frame-level predictions are averaged within each patient
+  before metrics are computed, which matches the clinical unit of analysis and avoids
+  letting patients with many frames dominate.
+- **Balanced sampling.** Each frame is weighted by the inverse of its patient's frame
+  count and its class's patient count, so classes and patients contribute equally during
+  training.
+- **Reproducibility.** Training uses the global seed in `cadica.config`; outputs are
+  written to Git-ignored `results/` and `checkpoints/` directories.
+

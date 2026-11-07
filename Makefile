@@ -1,6 +1,9 @@
 PYTHON ?= python
+FOLD ?= 1
+EPOCHS ?= 10
+BATCH_SIZE ?= 16
 
-.PHONY: install install-dev test lint folds sample prepare verify pipeline clean
+.PHONY: install install-dev test lint folds sample prepare verify pipeline train clean
 
 install:
 	$(PYTHON) -m pip install -e .
@@ -27,6 +30,9 @@ verify:
 	cadica-verify-folds
 
 pipeline: folds sample prepare verify
+
+train:
+	cadica-train --fold $(FOLD) --epochs $(EPOCHS) --batch-size $(BATCH_SIZE)
 
 clean:
 	rm -rf .pytest_cache .ruff_cache build dist *.egg-info
