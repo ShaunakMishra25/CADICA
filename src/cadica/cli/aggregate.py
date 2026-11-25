@@ -14,7 +14,9 @@ import pandas as pd
 from sklearn.metrics import (
     accuracy_score,
     balanced_accuracy_score,
+    cohen_kappa_score,
     f1_score,
+    mean_absolute_error,
     precision_recall_fscore_support,
 )
 
@@ -45,11 +47,19 @@ def fold_metrics(predictions: pd.DataFrame) -> dict[str, float]:
         zero_division=0,
     )
 
+    qwk = float(
+        cohen_kappa_score(y_true, y_pred, labels=labels, weights="quadratic")
+    )
+    if pd.isna(qwk):
+        qwk = 0.0
+
     metrics: dict[str, float] = {
         "patients": float(len(predictions)),
         "accuracy": float(accuracy_score(y_true, y_pred)),
         "balanced_accuracy": float(balanced_accuracy_score(y_true, y_pred)),
         "macro_f1": float(f1_score(y_true, y_pred, average="macro", zero_division=0)),
+        "qwk": qwk,
+        "ordinal_mae": float(mean_absolute_error(y_true, y_pred)),
     }
 
     for index, class_name in enumerate(CLASS_NAMES):
@@ -144,7 +154,9 @@ def main() -> None:
     print("\nMean +/- std across folds:")
 
     headline = summary[
-        summary["metric"].isin(["accuracy", "balanced_accuracy", "macro_f1"])
+        summary["metric"].isin(
+            ["accuracy", "balanced_accuracy", "macro_f1", "qwk", "ordinal_mae"]
+        )
     ]
 
     for row in headline.itertuples(index=False):

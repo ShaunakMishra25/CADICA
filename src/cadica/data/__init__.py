@@ -10,12 +10,14 @@ from cadica.data.loader import (
 from cadica.data.sampling import build_sampled_frames, evenly_spaced_indices
 from cadica.data.transforms import (
     AddGaussianNoise,
+    PerImageStandardize,
     build_eval_transform,
     build_train_transform,
 )
 
 __all__ = [
     "AddGaussianNoise",
+    "PerImageStandardize",
     "CADICADataset",
     "build_eval_transform",
     "build_patient_index",

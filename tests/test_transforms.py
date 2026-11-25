@@ -13,6 +13,7 @@ from torchvision import transforms  # noqa: E402
 
 from cadica.data.transforms import (  # noqa: E402
     AddGaussianNoise,
+    PerImageStandardize,
     build_eval_transform,
     build_train_transform,
 )
@@ -20,6 +21,12 @@ from cadica.data.transforms import (  # noqa: E402
 
 def make_image(size: int = 512) -> Image.Image:
     return Image.new("RGB", (size, size), color=(40, 40, 40))
+
+
+def make_gradient(size: int = 64) -> Image.Image:
+    image = Image.new("L", (size, size))
+    image.putdata([(x * 255) // (size - 1) for x in range(size)] * size)
+    return image.convert("RGB")
 
 
 def test_eval_transform_is_deterministic_and_sized() -> None:
@@ -80,3 +87,27 @@ def test_horizontal_flip_is_opt_in() -> None:
     # Default pipeline has no flip; the composed transform should still build.
     assert isinstance(build_train_transform(), transforms.Compose)
     assert isinstance(build_train_transform(horizontal_flip_p=0.5), transforms.Compose)
+
+
+def test_per_image_standardize_removes_mean_and_scale() -> None:
+    tensor = torch.rand(3, 16, 16) * 100 + 50
+    out = PerImageStandardize()(tensor)
+
+    assert torch.allclose(out.mean(dim=(1, 2)), torch.zeros(3), atol=1e-5)
+    assert torch.allclose(out.std(dim=(1, 2), unbiased=False), torch.ones(3), atol=1e-5)
+
+
+def test_intensity_norm_applies_to_eval_transform() -> None:
+    transform = build_eval_transform(intensity_norm="standardize")
+    out = transform(make_gradient())
+
+    assert out.shape == (3, 224, 224)
+    assert float(out.mean()) == pytest.approx(0.0, abs=1e-5)
+    assert float(out.std(unbiased=False)) == pytest.approx(1.0, abs=1e-4)
+
+
+def test_intensity_norm_rejects_unknown_mode() -> None:
+    with pytest.raises(ValueError):
+        build_eval_transform(intensity_norm="clahe")
+    with pytest.raises(ValueError):
+        build_train_transform(intensity_norm="clahe")

@@ -53,6 +53,10 @@ def test_fold_metrics_reports_per_class_columns() -> None:
         assert f"recall_{class_name}" in metrics
         assert f"support_{class_name}" in metrics
 
+    # Ordinal metrics: one adjacent error out of four patients.
+    assert metrics["ordinal_mae"] == pytest.approx(0.25)
+    assert metrics["qwk"] < 1.0
+
 
 def test_aggregate_folds_mean_and_std(tmp_path, monkeypatch) -> None:
     monkeypatch.setattr(aggregate, "RESULTS_DIR", tmp_path)
@@ -71,6 +75,7 @@ def test_aggregate_folds_mean_and_std(tmp_path, monkeypatch) -> None:
     assert len(per_fold) == N_SPLITS
     assert per_fold.loc[1, "accuracy"] == pytest.approx(0.75)
     assert per_fold.loc[1, "support_<20%"] == pytest.approx(2)
+    assert per_fold.loc[1, "ordinal_mae"] == pytest.approx(0.25)
 
     accuracy_row = summary[summary["metric"] == "accuracy"].iloc[0]
     assert accuracy_row["mean"] == pytest.approx((0.75 + 4) / 5)

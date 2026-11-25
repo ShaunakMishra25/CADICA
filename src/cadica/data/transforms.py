@@ -18,6 +18,40 @@ from torchvision import transforms
 #: Default input resolution used by the baseline CNN.
 IMAGE_SIZE = 224
 
+#: Supported per-image intensity normalization modes.
+INTENSITY_NORM_MODES = ("none", "standardize")
+
+
+class PerImageStandardize:
+    """Standardize each image independently to zero mean and unit variance.
+
+    Applied after ``ToTensor``. The statistics are computed per channel over the
+    spatial dimensions, so every frame carries its own exposure correction. This
+    removes global brightness/contrast differences between acquisitions, which
+    is useful for angiography because exposure is a strong nuisance signal.
+    """
+
+    def __init__(self, eps: float = 1e-6) -> None:
+        if eps <= 0:
+            raise ValueError(f"eps must be positive, got {eps}")
+        self.eps = float(eps)
+
+    def __call__(self, tensor: torch.Tensor) -> torch.Tensor:
+        mean = tensor.mean(dim=(1, 2), keepdim=True)
+        std = tensor.std(dim=(1, 2), keepdim=True, unbiased=False)
+        return (tensor - mean) / std.clamp_min(self.eps)
+
+    def __repr__(self) -> str:
+        return f"{self.__class__.__name__}(eps={self.eps})"
+
+
+def _validate_intensity_norm(intensity_norm: str) -> None:
+    if intensity_norm not in INTENSITY_NORM_MODES:
+        raise ValueError(
+            f"intensity_norm must be one of {INTENSITY_NORM_MODES}, "
+            f"got {intensity_norm!r}"
+        )
+
 
 class AddGaussianNoise:
     """Add zero-mean Gaussian noise to a tensor image.
@@ -64,6 +98,7 @@ def build_train_transform(
     gaussian_std: float = 0.02,
     gaussian_p: float = 0.5,
     horizontal_flip_p: float = 0.0,
+    intensity_norm: str = "none",
 ) -> transforms.Compose:
     """Build the augmentation pipeline used for training frames.
 
@@ -85,7 +120,12 @@ def build_train_transform(
     horizontal_flip_p:
         Probability of a horizontal flip. Defaults to ``0.0`` (disabled) because
         flips change coronary laterality. Enable only after an ablation.
+    intensity_norm:
+        ``"none"`` or ``"standardize"`` for per-image zero-mean/unit-variance
+        normalization. Must match the evaluation transform.
     """
+    _validate_intensity_norm(intensity_norm)
+
     ops: list[object] = []
 
     if horizontal_flip_p > 0:
@@ -108,14 +148,25 @@ def build_train_transform(
         ]
     )
 
+    if intensity_norm == "standardize":
+        ops.append(PerImageStandardize())
+
     return transforms.Compose(ops)
 
 
-def build_eval_transform(image_size: int = IMAGE_SIZE) -> transforms.Compose:
+def build_eval_transform(
+    image_size: int = IMAGE_SIZE,
+    intensity_norm: str = "none",
+) -> transforms.Compose:
     """Build the deterministic transform used for validation and testing."""
-    return transforms.Compose(
-        [
-            transforms.Resize((image_size, image_size)),
-            transforms.ToTensor(),
-        ]
-    )
+    _validate_intensity_norm(intensity_norm)
+
+    ops: list[object] = [
+        transforms.Resize((image_size, image_size)),
+        transforms.ToTensor(),
+    ]
+
+    if intensity_norm == "standardize":
+        ops.append(PerImageStandardize())
+
+    return transforms.Compose(ops)

@@ -236,6 +236,10 @@ Add one row per condition actually run. Never overwrite a row; add a new one.
 | E4 | | class-weighted loss | 5 | 2 | 60 epochs, last | on | no sampler | | | D-007 |
 | E5 | | sampler + class weights | 5 | 2 | 60 epochs, last | on | both | | | over-correction check |
 | E6 | | horizontal flip | 5 | 2 | 60 epochs, last | on | flip p=0.5 | | | only if D-003 revisited |
+| E7 | 2026-11-25 | intensity norm, no aug | 5 | 1 (s42) | 60 epochs, last | off | standardize, sampler | | | D-010 |
+| E8 | 2026-11-25 | intensity norm + aug | 5 | 1 (s42) | 60 epochs, last | on | standardize, sampler | | | D-010 |
+| E9 | 2026-11-25 | weighted CE, no sampler | 5 | 1 (s42) | 60 epochs, last | off | standardize, weighted_ce | | | D-011 |
+| E10 | 2026-11-25 | focal, no sampler | 5 | 1 (s42) | 60 epochs, last | off | standardize, focal gamma=2 | | | D-011 |
 
 Results must be produced by the aggregation script so the numbers are reproducible.
 

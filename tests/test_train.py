@@ -50,6 +50,27 @@ def test_should_stop_respects_min_epochs_and_patience() -> None:
     )
 
 
+def test_compute_class_weights_use_patients_not_frames() -> None:
+    train_df = pd.DataFrame(
+        {
+            "patient_id": [
+                "p1", "p1", "p1", "p2", "p3", "p3",
+                "p4", "p5", "p5", "p5", "p6",
+            ],
+            "severity": [
+                "<20%", "<20%", "<20%", "<20%", "20-50%", "20-50%",
+                ">70%", ">70%", ">70%", ">70%", ">70%",
+            ],
+        }
+    )
+
+    weights = train.compute_class_weights(train_df)
+
+    # Patient counts are 2, 1, 3 -> middle class is the rarest by patient.
+    assert float(weights.mean()) == pytest.approx(1.0)
+    assert float(weights[1]) > float(weights[0]) > float(weights[2])
+
+
 def test_write_predictions_roundtrip(tmp_path) -> None:
     results = {
         "p1": {"label": 0, "prediction": 1, "probabilities": [0.2, 0.7, 0.1]},

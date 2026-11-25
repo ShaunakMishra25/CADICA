@@ -30,7 +30,7 @@ from cadica.config import (
     val_fold_path,
 )
 from cadica.data import CADICADataset, build_eval_transform, build_train_transform
-from cadica.models import CADICACNN
+from cadica.models import CADICACNN, FocalLoss
 
 # --------------------------------------------------
 # 1. ARGUMENTS
@@ -159,6 +159,41 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=20,
         help="Do not stop before this epoch, so the LR schedule has a chance.",
+    )
+
+    # --------------------------------------------------
+    # Imbalance handling and preprocessing
+    # --------------------------------------------------
+
+    parser.add_argument(
+        "--intensity-norm",
+        choices=("none", "standardize"),
+        default="none",
+        help=(
+            "Per-image intensity normalization applied to both splits. "
+            "'standardize' removes per-frame exposure differences."
+        ),
+    )
+
+    parser.add_argument(
+        "--sampler",
+        choices=("balanced", "none"),
+        default="balanced",
+        help="'balanced' uses the patient- and class-balanced WeightedRandomSampler.",
+    )
+
+    parser.add_argument(
+        "--loss",
+        choices=("ce", "weighted_ce", "focal"),
+        default="ce",
+        help="Cross-entropy, class-weighted cross-entropy, or focal loss.",
+    )
+
+    parser.add_argument(
+        "--focal-gamma",
+        type=float,
+        default=2.0,
+        help="Focusing parameter for focal loss.",
     )
 
     # --------------------------------------------------
@@ -430,6 +465,26 @@ def scalar_metrics(metrics: dict[str, object]) -> dict[str, float]:
     }
 
 
+def compute_class_weights(train_df: pd.DataFrame) -> torch.Tensor:
+    """Inverse patient-frequency class weights in ``CLASS_NAMES`` order.
+
+    The unit of analysis is the patient, so counts are taken over unique
+    patients, not frames. Weights are normalised to mean 1.
+    """
+    patient_labels = train_df[["patient_id", "severity"]].drop_duplicates()
+    counts = patient_labels["severity"].value_counts()
+
+    inverse = {
+        name: 1.0 / max(int(counts.get(name, 0)), 1) for name in CLASS_NAMES
+    }
+    mean_inverse = sum(inverse.values()) / len(inverse)
+
+    return torch.tensor(
+        [inverse[name] / mean_inverse for name in CLASS_NAMES],
+        dtype=torch.float32,
+    )
+
+
 # --------------------------------------------------
 # 7. MAIN TRAINING FUNCTION
 # --------------------------------------------------
@@ -461,6 +516,12 @@ def main() -> None:
 
     print(f"Scheduler: {args.scheduler}")
 
+    print(f"Sampler: {args.sampler}")
+    print(f"Loss: {args.loss}")
+    if args.loss == "focal":
+        print(f"  focal gamma={args.focal_gamma}")
+    print(f"Intensity normalization: {args.intensity_norm}")
+
     if args.scheduler == "plateau":
         print(f"  factor={args.lr_factor} patience={args.lr_patience} min_lr={args.min_lr}")
 
@@ -491,7 +552,7 @@ def main() -> None:
 
     train_df = pd.read_csv(train_csv)
 
-    val_transform = build_eval_transform()
+    val_transform = build_eval_transform(intensity_norm=args.intensity_norm)
 
     if args.augment:
         train_transform = build_train_transform(
@@ -501,6 +562,7 @@ def main() -> None:
             contrast=args.contrast,
             gaussian_std=args.noise_std,
             horizontal_flip_p=args.hflip_prob,
+            intensity_norm=args.intensity_norm,
         )
     else:
         train_transform = val_transform
@@ -538,12 +600,13 @@ def main() -> None:
     # 9. DATA LOADERS
     # --------------------------------------------------
 
-    sampler = build_sampler(train_df)
+    sampler = build_sampler(train_df) if args.sampler == "balanced" else None
 
     train_loader = DataLoader(
         train_dataset,
         batch_size=args.batch_size,
         sampler=sampler,
+        shuffle=sampler is None,
         num_workers=args.num_workers,
         pin_memory=device.type == "cuda",
     )
@@ -562,7 +625,20 @@ def main() -> None:
 
     model = CADICACNN(num_classes=len(CLASS_NAMES)).to(device)
 
-    criterion = nn.CrossEntropyLoss()
+    class_weights = compute_class_weights(train_df).to(device)
+
+    if args.loss == "ce":
+        criterion: nn.Module = nn.CrossEntropyLoss()
+    elif args.loss == "weighted_ce":
+        criterion = nn.CrossEntropyLoss(weight=class_weights)
+    else:
+        criterion = FocalLoss(gamma=args.focal_gamma, weight=class_weights)
+
+    weight_text = ", ".join(
+        f"{name}={weight:.2f}"
+        for name, weight in zip(CLASS_NAMES, class_weights.tolist(), strict=True)
+    )
+    print(f"\nCLASS WEIGHTS (patient-level): {weight_text}")
 
     optimizer = torch.optim.Adam(
         model.parameters(),
@@ -817,6 +893,11 @@ def main() -> None:
         "es_patience": args.es_patience,
         "es_min_delta": args.es_min_delta,
         "es_min_epochs": args.es_min_epochs,
+        "intensity_norm": args.intensity_norm,
+        "sampler": args.sampler,
+        "loss": args.loss,
+        "focal_gamma": args.focal_gamma if args.loss == "focal" else None,
+        "class_weights": class_weights.tolist(),
         "augment": args.augment,
         "rotation_degrees": args.rotation_degrees,
         "translate": args.translate,
