@@ -154,6 +154,49 @@ on.
 seed-to-seed noise.
 **Consequences:** more compute; a fold-aggregation script is required, not optional.
 
+### D-010 — Normalize intensity per image before training
+
+**Status:** accepted (2026-11-25), to be validated in E7/E8
+**Context:** §4.2c shows class-correlated global intensity and contrast: a brightness
+threshold beats the model on `>70%` vs rest. Photometric augmentation destroys that
+shortcut and the augmented run then fails to fit.
+**Decision:** add `--intensity-norm {none,standardize}`. `standardize` applies a per-image
+z-score after `ToTensor`, so every frame has zero mean and unit variance.
+**Alternatives rejected:** dataset-level mean/std normalization (does not remove per-image
+exposure differences); CLAHE or histogram equalization (better for vessel contrast, but
+adds an OpenCV/scikit-image dependency and is a larger change).
+**Why rejected:** they do not isolate the exposure confound as cleanly, or cost a new
+dependency.
+**Consequences:** input range changes, so Gaussian-noise strength must be re-tuned;
+normalization may also remove clinically meaningful contrast information. This is a
+diagnostic ablation, not automatically the final preprocessing.
+
+### D-011 — Test loss-based imbalance handling without the sampler
+
+**Status:** accepted (2026-11-25), to be tested in E9/E10
+**Context:** §4.2e shows the balanced sampler over-predicts the rarest class at
+convergence; D-007 forbids stacking mechanisms without attribution.
+**Decision:** add `--loss {ce,weighted_ce,focal}` and `--sampler {balanced,none}`. Test
+weighted CE and focal loss with the sampler **off** against the sampler-only baseline.
+Class weights are derived from patient-level counts (6 / 8 / 28), normalized to mean 1.
+**Alternatives rejected:** sampler plus class weights (double correction, unidentifiable);
+prior correction at inference (complementary, but later).
+**Why rejected:** they confound the comparison or require calibrated probabilities first.
+**Consequences:** focal loss adds a `gamma` hyperparameter; results must be compared on
+macro F1 and per-class recall, not accuracy.
+
+### D-012 — Add ordinal metrics
+
+**Status:** accepted (2026-11-25)
+**Context:** severity is ordered, and §4.2b shows the errors are mostly between adjacent
+classes. Macro F1 treats `<20%`→`20-50%` like `<20%`→`>70%`.
+**Decision:** add quadratic weighted kappa (QWK) and ordinal MAE to fold aggregation.
+**Alternatives rejected:** keep macro F1 only.
+**Why rejected:** it hides whether a model is improving the clinically meaningful
+boundaries.
+**Consequences:** aggregation emits QWK and MAE alongside macro F1; macro F1 stays the
+primary metric for comparability with E1/E2.
+
 ---
 
 ## 3. Change log
@@ -169,6 +212,7 @@ seed-to-seed noise.
 | 2026-11-24 | Dataset root fallback corrected to the path that exists on this machine (`/run/media/shaunak/...`); `CADICA_DATA_ROOT` still overrides | `src/cadica/config.py` | `learnings.md` known issue 1; otherwise training cannot find metadata or frames | path verified to contain `metadata.xlsx` and `selectedVideos/` |
 | 2026-11-24 | Environment verified: CUDA available, full test suite green, 5-fold smoke run end-to-end, aggregation for both variants | outside the repo | Close environment setup | torch 2.15.0+cu132, torchvision 0.29.2+cu132, RTX 4050 detected; `pytest` 44 passed; ruff clean on `src` and `tests` |
 | 2026-11-25 | Ran E1 (no augmentation) and E2 (augmentation): 5 folds, 60 epochs, seed 42, `num_workers=4`, early stopping off; aggregated `last` and `best` variants | outputs ignored under `results/` and `checkpoints/` | D-008, D-009 | 10 fold runs completed; 5/5 folds aggregated per condition; numbers in §4.1 |
+| 2026-11-25 | Logged diagnosis of the low scores and added decisions D-010 (per-image intensity normalization), D-011 (loss-based imbalance handling), D-012 (ordinal metrics) | `docs/experiments.md` | Explain E1/E2 before changing code | n/a (analysis of existing runs) |
 
 ### Pending changes (not implemented yet)
 
@@ -243,6 +287,82 @@ Observations:
 
 Next actions: run seed 137 for E1 and E2 before accepting or rejecting augmentation; then
 compare against a class-weighted or focal loss, and a pretrained backbone.
+
+### 4.2 Diagnosis — why E1/E2 scores are low (2026-11-25)
+
+Evidence gathered from the completed runs, the manifests, and the raw frames. These are
+competing explanations, not one proven cause.
+
+**a. Frame labels are weak.** The metadata label is the patient's maximum stenosis across
+all vessels, but the training unit is a frame from one video. A `>70%` patient also has
+videos of less-diseased vessels, so many of their frames contain no evidence for the
+label.
+
+| Quantity | Value |
+|---|---:|
+| Frames | 3,042 |
+| Videos | 382 |
+| Patients | 42 |
+| Videos per patient (median, range) | 8 (3–16) |
+| Frames per patient (median, range) | 64 (17–128) |
+
+Eight evenly spaced frames per video are near-duplicates, so the effective sample is closer
+to 382 correlated images from 42 people than to 3,042 independent samples.
+
+**b. The two minority classes are not separable from each other.** Pooled confusion over
+all five folds (rows = actual, columns = predicted):
+
+| | E1 no aug | E2 aug |
+|---|---|---|
+| `<20%` → correct | 2 / 6 | 0 / 6 |
+| `20-50%` → correct | 2 / 8 | 6 / 8 |
+| `>70%` → correct | 19 / 28 | 16 / 28 |
+| `20-50%` predicted as `<20%` | 6 / 8 | 2 / 8 |
+| `<20%` predicted as `20-50%` | 3 / 6 | 6 / 6 |
+
+The model behaves as a "severe vs not" detector. The `<20%` vs `20-50%` boundary is where
+single-frame visual estimation is also unreliable, and macro F1 penalises that adjacent
+error as harshly as a far error.
+
+**c. Global intensity is a shortcut, and augmentation removes it.** Patient-level mean
+intensity of the sampled frames:
+
+| Class | Mean intensity | Std |
+|---|---:|---:|
+| `>70%` | 124.8 | 12.7 |
+| `<20%` | 138.5 | 3.8 |
+| `20-50%` | 141.8 | 6.4 |
+
+A single brightness threshold reaches **78.6%** on `>70%` vs rest, above the model's 54%
+accuracy. Training behaviour differs sharply:
+
+| | E1 no aug | E2 aug |
+|---|---:|---:|
+| Train loss, epoch 1 → 60 | 1.08 → **0.25** | 1.08 → **0.87** |
+| Mean prediction confidence | 0.78 | 0.45–0.50 |
+
+E1 fits the training data and leans on the exposure difference. E2 never fits
+(0.87 ≈ barely below `ln 3 = 1.10`), becomes uncertain, and collapses toward `20-50%`.
+So E1 vs E2 currently measures "the model uses an exposure shortcut and photometric
+augmentation destroys it", not "augmentation helps or hurts".
+
+**d. The epoch budget overshoots the useful range.** Best epochs were 2, 3, 4, 11, 12 (E1)
+and 2, 2, 3, 10, 20 (E2). Sixty epochs is far past the point where the fold metric peaked.
+E1 fold 1 reached macro F1 1.0 on 9 patients at epoch 11 and fell to 0.72 by epoch 60; that
+one fold drives most of the best-epoch mean and its standard deviation.
+
+**e. The balanced sampler over-corrects at convergence.** E1 predicted 12 `<20%` patients
+when 6 exist and missed 9 of 28 `>70%` patients. Training makes each class equally likely,
+so the implicit prior is 1/3–1/3–1/3 while validation is 6/8/28. This costs accuracy and
+majority recall.
+
+**f. The metric is noise-dominated at this sample size.** With 1–2 minority patients per
+fold, one patient flipping changes a fold's macro F1 by ~0.11–0.33. A 0.05 difference
+between conditions cannot be resolved with five folds and one seed.
+
+Implications: remove the exposure shortcut before judging augmentation; stop relying on
+sampling alone for imbalance; shorten the budget or rely on checkpoint selection; add
+ordinal metrics; and expect a pretrained backbone to matter more than augmentation tuning.
 
 ---
 
