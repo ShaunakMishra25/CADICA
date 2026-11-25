@@ -49,6 +49,7 @@ cadica-prepare-folds = "cadica.cli.prepare_folds:main"
 cadica-verify-folds = "cadica.cli.verify_folds:main"
 cadica-inspect-folds = "cadica.cli.inspect_folds:main"
 cadica-train = "cadica.cli.train:main"
+cadica-aggregate = "cadica.cli.aggregate:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

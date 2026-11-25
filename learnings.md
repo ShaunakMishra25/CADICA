@@ -172,9 +172,13 @@ Default training configuration:
 
 Outputs:
 
-- `results/training_log_fold_<k>.csv`
-- `results/patient_predictions_fold_<k>.csv`
-- `checkpoints/baseline_fold_<k>.pt`
+- `results/<tag>_training_log_fold_<k>.csv`
+- `results/<tag>_patient_predictions_fold_<k>.csv` (last epoch, fixed budget)
+- `results/<tag>_best_patient_predictions_fold_<k>.csv` (best epoch)
+- `checkpoints/<tag>_fold_<k>_last.pt`
+- `checkpoints/<tag>_fold_<k>_best.pt`
+
+`<tag>` is the `--run-tag` value (default `baseline`).
 
 ### 3.8 Tests and documentation
 
@@ -245,11 +249,10 @@ The manifests themselves are clean:
 
 ### High priority
 
-1. **Default dataset path is broken on this machine.**
-   `config.py` falls back to
-   `/run/media/shaunakmishra25/DATA/Coronary Research/...`, but the current dataset lives
-   under `/run/media/shaunak/DATA/Coronary Research/...`.
-   Without `CADICA_DATA_ROOT`, dataset loading and pipeline regeneration fail.
+1. ~~**Default dataset path is broken on this machine.**~~
+   **Fixed 2026-11-24.** `config.py` now falls back to
+   `/run/media/shaunak/DATA/Coronary Research/...`, and `CADICA_DATA_ROOT` still
+   overrides it. See `docs/experiments.md` §9.
 
 2. **Video counts in `verify_folds.py` are undercounted.**
    `groupby("fold")["video_id"].nunique()` treats `v1` from different patients as the
@@ -389,23 +392,28 @@ The manifests themselves are clean:
   could not be run during this review.
 - Manifests: clean and consistent with the raw dataset.
 
-Environment note:
+Environment note (updated 2026-11-24):
 
-```text
-/run/media/shaunak/DATA/Coronary Research/.venv/bin/python
-```
+The old `/run/media/shaunak/DATA/Coronary Research/.venv` is corrupted: NTFS made
+`.venv/bin/python` a non-executable data file. Do not create venvs on the NTFS mount.
 
-is not executable on this machine (reported as a `data` file). Recreate the environment
-before relying on the existing install:
+A working environment now lives on the btrfs home partition:
 
 ```bash
+source ~/.venvs/cadica/bin/activate
 cd "/run/media/shaunak/DATA/Coronary Research/ClassificationImplementations"
-python3 -m venv .venv
-source .venv/bin/activate
-python -m pip install -e ".[dev]"
+python -m pytest
 ```
 
-Also set the dataset root explicitly:
+It was created with `uv` and CPython 3.12 because the system Python is 3.14 and has no
+`pip`. If you need to rebuild it:
+
+```bash
+uv venv ~/.venvs/cadica --python 3.12
+uv pip install --python ~/.venvs/cadica/bin/python -e ".[dev]"
+```
+
+The dataset root now has a correct default, so the export is optional:
 
 ```bash
 export CADICA_DATA_ROOT="/run/media/shaunak/DATA/Coronary Research/CADICA a new dataset for coronary artery disease/CADICA/CADICA"

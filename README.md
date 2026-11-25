@@ -148,18 +148,43 @@ The trainer:
 
 - loads `data/folds/train_fold_<k>.csv` and `data/folds/val_fold_<k>.csv`;
 - balances classes **and** patients with `WeightedRandomSampler`;
+- augments only the training split (small rotation, translation, jitter, noise);
 - averages frame probabilities per patient before scoring;
+- schedules the learning rate with `ReduceLROnPlateau` on patient-level macro F1;
+- supports early stopping with a minimum-epoch guard;
 - reports patient-level accuracy, balanced accuracy, macro F1, a confusion matrix, and a
-  per-class classification report;
+  per-class classification report, for both the last and best epoch;
 - writes outputs to the ignored `results/` and `checkpoints/` directories.
 
-| Output                                      | Description                              |
-| ------------------------------------------- | ---------------------------------------- |
-| `results/training_log_fold_<k>.csv`         | Per-epoch training loss                  |
-| `results/patient_predictions_fold_<k>.csv`  | Patient-level predictions and probabilities |
-| `checkpoints/baseline_fold_<k>.pt`          | Model and optimizer state                |
+`<tag>` is `--run-tag` (default `baseline`). Use a unique tag per condition and seed.
 
-Useful options: `--lr`, `--num-workers`, and `--device cpu` or `--device cuda`.
+| Output | Description |
+| --- | --- |
+| `results/<tag>_training_log_fold_<k>.csv` | Per-epoch loss, LR, metrics, best flag |
+| `results/<tag>_patient_predictions_fold_<k>.csv` | Last-epoch predictions (fixed-budget headline) |
+| `results/<tag>_best_patient_predictions_fold_<k>.csv` | Best-epoch predictions (secondary) |
+| `checkpoints/<tag>_fold_<k>_last.pt` | Final model and optimizer state |
+| `checkpoints/<tag>_fold_<k>_best.pt` | Best-macro-F1 weights |
+| `results/<tag>_<variant>_per_fold.csv` | Aggregated per-fold metrics |
+| `results/<tag>_<variant>_summary.csv` | Mean ± std across folds |
+
+Useful options: `--run-tag`, `--seed`, `--lr`, `--num-workers`, `--device`, `--augment`,
+`--no-early-stopping`, `--es-patience`, `--es-min-epochs`, `--scheduler`.
+
+For the fixed-budget comparison protocol, disable early stopping so the last epoch is not
+selected on the validation fold:
+
+```bash
+cadica-train --fold 1 --epochs 60 --run-tag e2_aug_s42 --no-early-stopping
+cadica-aggregate --run-tag e2_aug_s42 --variant last
+```
+
+Or run all five folds and aggregate with Make:
+
+```bash
+make train-all RUN_TAG=e2_aug_s42 EPOCHS=60 EXTRA=--no-early-stopping
+make aggregate RUN_TAG=e2_aug_s42 VARIANT=last
+```
 
 You can also run the module directly:
 
@@ -237,7 +262,8 @@ files are unavailable, so the suite also runs on a clean checkout.
 - **Manifest paths:** relative to `CADICA_DATA_ROOT/selectedVideos`, never absolute.
 
 See [`docs/dataset.md`](docs/dataset.md) and [`docs/pipeline.md`](docs/pipeline.md) for
-details.
+details. Design rationale, the change log, and the experiment registry live in
+[`docs/experiments.md`](docs/experiments.md).
 
 ---
 

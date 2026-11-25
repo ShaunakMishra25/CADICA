@@ -29,7 +29,7 @@ CHECKPOINTS_DIR = PROJECT_ROOT / "checkpoints"
 # Raw dataset
 # ---------------------------------------------------------------------------
 _DEFAULT_DATA_ROOT = Path(
-    "/run/media/shaunakmishra25/DATA/Coronary Research/"
+    "/run/media/shaunak/DATA/Coronary Research/"
     "CADICA a new dataset for coronary artery disease/CADICA/CADICA"
 )
 

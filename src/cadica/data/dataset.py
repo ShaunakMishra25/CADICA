@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from pathlib import Path
 
 import pandas as pd
@@ -11,18 +12,14 @@ from torch.utils.data import Dataset
 from torchvision import transforms
 
 from cadica.config import LABEL_MAP, SAMPLED_FRAMES_PATH, SELECTED_ROOT
+from cadica.data.transforms import build_eval_transform
 
 _REQUIRED_COLUMNS = {"image_path", "severity", "patient_id"}
 
 
 def default_transform() -> transforms.Compose:
     """Return the deterministic preprocessing used by the baseline CNN."""
-    return transforms.Compose(
-        [
-            transforms.Resize((224, 224)),
-            transforms.ToTensor(),
-        ]
-    )
+    return build_eval_transform()
 
 
 def resolve_image_path(image_path: str | Path) -> Path:
@@ -51,7 +48,7 @@ class CADICADataset(Dataset):
     def __init__(
         self,
         csv_path: str | Path | None = None,
-        transform: transforms.Compose | None = None,
+        transform: Callable[[Image.Image], object] | None = None,
     ) -> None:
         self.csv_path = Path(csv_path or SAMPLED_FRAMES_PATH)
         self.data = pd.read_csv(self.csv_path)

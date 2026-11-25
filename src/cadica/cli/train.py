@@ -4,12 +4,12 @@ from __future__ import annotations
 
 import argparse
 import random
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
 import torch
 import torch.nn as nn
-
 from sklearn.metrics import (
     accuracy_score,
     balanced_accuracy_score,
@@ -17,7 +17,7 @@ from sklearn.metrics import (
     confusion_matrix,
     f1_score,
 )
-
+from torch.optim.lr_scheduler import ReduceLROnPlateau
 from torch.utils.data import DataLoader, WeightedRandomSampler
 
 from cadica.config import (
@@ -29,10 +29,8 @@ from cadica.config import (
     train_fold_path,
     val_fold_path,
 )
-
-from cadica.data import CADICADataset
+from cadica.data import CADICADataset, build_eval_transform, build_train_transform
 from cadica.models import CADICACNN
-
 
 # --------------------------------------------------
 # 1. ARGUMENTS
@@ -52,9 +50,25 @@ def parse_args() -> argparse.Namespace:
     )
 
     parser.add_argument(
+        "--run-tag",
+        default="baseline",
+        help=(
+            "Prefix for output files. Use a unique tag per condition and seed, "
+            "for example e2_aug_s42."
+        ),
+    )
+
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=SEED,
+    )
+
+    parser.add_argument(
         "--epochs",
         type=int,
-        default=25,
+        default=60,
+        help="Maximum epochs. This is the fixed budget when early stopping is off.",
     )
 
     parser.add_argument(
@@ -79,6 +93,128 @@ def parse_args() -> argparse.Namespace:
         "--device",
         default=None,
         help="cuda or cpu. Automatically detected if omitted.",
+    )
+
+    # --------------------------------------------------
+    # Learning-rate schedule
+    # --------------------------------------------------
+
+    parser.add_argument(
+        "--scheduler",
+        choices=("plateau", "none"),
+        default="plateau",
+        help="Learning-rate scheduler. Plateau monitors patient-level macro F1.",
+    )
+
+    parser.add_argument(
+        "--lr-factor",
+        type=float,
+        default=0.3,
+        help="Multiplicative factor applied when the plateau scheduler fires.",
+    )
+
+    parser.add_argument(
+        "--lr-patience",
+        type=int,
+        default=3,
+        help="Epochs without improvement before the LR is reduced.",
+    )
+
+    parser.add_argument(
+        "--min-lr",
+        type=float,
+        default=1e-6,
+    )
+
+    # --------------------------------------------------
+    # Early stopping
+    # --------------------------------------------------
+
+    parser.add_argument(
+        "--early-stopping",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "Enable early stopping on patient-level macro F1. Disable for the "
+            "fixed-budget comparison protocol."
+        ),
+    )
+
+    parser.add_argument(
+        "--es-patience",
+        type=int,
+        default=10,
+        help="Epochs without improvement before training stops.",
+    )
+
+    parser.add_argument(
+        "--es-min-delta",
+        type=float,
+        default=0.02,
+        help="Minimum macro-F1 improvement that counts as progress.",
+    )
+
+    parser.add_argument(
+        "--es-min-epochs",
+        type=int,
+        default=20,
+        help="Do not stop before this epoch, so the LR schedule has a chance.",
+    )
+
+    # --------------------------------------------------
+    # Augmentation (training split only)
+    # --------------------------------------------------
+
+    parser.add_argument(
+        "--augment",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Apply on-the-fly augmentation to training frames.",
+    )
+
+    parser.add_argument(
+        "--rotation-degrees",
+        type=float,
+        default=7.0,
+        help="Maximum absolute rotation in degrees. Keep within 5-10.",
+    )
+
+    parser.add_argument(
+        "--translate",
+        type=float,
+        default=0.05,
+        help="Maximum translation as a fraction of image size.",
+    )
+
+    parser.add_argument(
+        "--brightness",
+        type=float,
+        default=0.15,
+        help="Brightness jitter magnitude in [0, 1].",
+    )
+
+    parser.add_argument(
+        "--contrast",
+        type=float,
+        default=0.15,
+        help="Contrast jitter magnitude in [0, 1].",
+    )
+
+    parser.add_argument(
+        "--noise-std",
+        type=float,
+        default=0.02,
+        help="Gaussian noise standard deviation in [0, 1] intensity units.",
+    )
+
+    parser.add_argument(
+        "--hflip-prob",
+        type=float,
+        default=0.0,
+        help=(
+            "Probability of horizontal flip. Defaults to 0 because flips change "
+            "coronary laterality; enable only after an ablation."
+        ),
     )
 
     return parser.parse_args()
@@ -241,7 +377,61 @@ def calculate_metrics(
 
 
 # --------------------------------------------------
-# 6. MAIN TRAINING FUNCTION
+# 6. TRAINING CONTROL
+# --------------------------------------------------
+
+
+def clone_state_dict(model: nn.Module) -> dict[str, torch.Tensor]:
+    """Return a CPU copy of a model's state, detached from the live parameters."""
+    return {
+        name: tensor.detach().cpu().clone()
+        for name, tensor in model.state_dict().items()
+    }
+
+
+def should_stop(
+    epoch: int,
+    epochs_without_improvement: int,
+    patience: int,
+    min_epochs: int,
+) -> bool:
+    """Return True when early stopping should end training after ``epoch``."""
+    return epoch >= min_epochs and epochs_without_improvement >= patience
+
+
+def write_predictions(path: Path, results: dict[str, dict[str, object]]) -> None:
+    """Write patient-level predictions and class probabilities to CSV."""
+    rows = []
+
+    for patient_id, result in results.items():
+        row = {
+            "patient_id": patient_id,
+            "actual": result["label"],
+            "predicted": result["prediction"],
+        }
+
+        for class_name, probability in zip(
+            CLASS_NAMES,
+            result["probabilities"],
+            strict=True,
+        ):
+            row[f"p_{class_name}"] = probability
+
+        rows.append(row)
+
+    pd.DataFrame(rows).to_csv(path, index=False)
+
+
+def scalar_metrics(metrics: dict[str, object]) -> dict[str, float]:
+    """Return only the numeric metrics that belong in a checkpoint or log."""
+    return {
+        key: float(metrics[key])
+        for key in ("accuracy", "balanced_accuracy", "macro_f1")
+    }
+
+
+# --------------------------------------------------
+# 7. MAIN TRAINING FUNCTION
 # --------------------------------------------------
 
 
@@ -249,7 +439,7 @@ def main() -> None:
 
     args = parse_args()
 
-    set_seed(SEED)
+    set_seed(args.seed)
 
     device = torch.device(
         args.device or ("cuda" if torch.cuda.is_available() else "cpu")
@@ -260,13 +450,34 @@ def main() -> None:
     print("=" * 55)
 
     print(f"Device: {device}")
+    print(f"Run tag: {args.run_tag}")
+    print(f"Seed: {args.seed}")
     print(f"Fold: {args.fold}")
-    print(f"Epochs: {args.epochs}")
+    print(f"Max epochs: {args.epochs}")
     print(f"Batch size: {args.batch_size}")
     print(f"Learning rate: {args.lr}")
 
+    print("\nOPTIMIZATION CONTROL")
+
+    print(f"Scheduler: {args.scheduler}")
+
+    if args.scheduler == "plateau":
+        print(f"  factor={args.lr_factor} patience={args.lr_patience} min_lr={args.min_lr}")
+
+    print(f"Early stopping: {args.early_stopping}")
+
+    if args.early_stopping:
+        print(
+            f"  patience={args.es_patience} min_delta={args.es_min_delta} "
+            f"min_epochs={args.es_min_epochs}"
+        )
+        print(
+            "  Note: early-stopped epochs are selected on the validation fold. "
+            "Use --no-early-stopping for fixed-budget comparisons."
+        )
+
     # --------------------------------------------------
-    # 7. LOAD DATA
+    # 8. LOAD DATA
     # --------------------------------------------------
 
     train_csv = train_fold_path(args.fold)
@@ -280,13 +491,38 @@ def main() -> None:
 
     train_df = pd.read_csv(train_csv)
 
-    train_dataset = CADICADataset(train_csv)
-    val_dataset = CADICADataset(val_csv)
+    val_transform = build_eval_transform()
+
+    if args.augment:
+        train_transform = build_train_transform(
+            rotation_degrees=args.rotation_degrees,
+            translate=args.translate,
+            brightness=args.brightness,
+            contrast=args.contrast,
+            gaussian_std=args.noise_std,
+            horizontal_flip_p=args.hflip_prob,
+        )
+    else:
+        train_transform = val_transform
+
+    train_dataset = CADICADataset(train_csv, transform=train_transform)
+    val_dataset = CADICADataset(val_csv, transform=val_transform)
 
     print("\nDATASET INFORMATION")
 
     print("Training frames:", len(train_dataset))
     print("Validation frames:", len(val_dataset))
+
+    print("\nAUGMENTATION")
+
+    if args.augment:
+        print(f"Rotation: +/-{args.rotation_degrees} degrees")
+        print(f"Translation: +/-{args.translate:.2%} of image size")
+        print(f"Brightness/contrast jitter: {args.brightness}/{args.contrast}")
+        print(f"Gaussian noise std: {args.noise_std}")
+        print(f"Horizontal flip probability: {args.hflip_prob}")
+    else:
+        print("Disabled (evaluation transform applied to both splits)")
 
     print(
         "Training patients:",
@@ -299,7 +535,7 @@ def main() -> None:
     )
 
     # --------------------------------------------------
-    # 8. DATA LOADERS
+    # 9. DATA LOADERS
     # --------------------------------------------------
 
     sampler = build_sampler(train_df)
@@ -309,6 +545,7 @@ def main() -> None:
         batch_size=args.batch_size,
         sampler=sampler,
         num_workers=args.num_workers,
+        pin_memory=device.type == "cuda",
     )
 
     val_loader = DataLoader(
@@ -316,10 +553,11 @@ def main() -> None:
         batch_size=args.batch_size,
         shuffle=False,
         num_workers=args.num_workers,
+        pin_memory=device.type == "cuda",
     )
 
     # --------------------------------------------------
-    # 9. MODEL, LOSS AND OPTIMIZER
+    # 10. MODEL, LOSS, OPTIMIZER AND SCHEDULER
     # --------------------------------------------------
 
     model = CADICACNN(num_classes=len(CLASS_NAMES)).to(device)
@@ -331,10 +569,27 @@ def main() -> None:
         lr=args.lr,
     )
 
+    scheduler = None
+
+    if args.scheduler == "plateau":
+        scheduler = ReduceLROnPlateau(
+            optimizer,
+            mode="max",
+            factor=args.lr_factor,
+            patience=args.lr_patience,
+            min_lr=args.min_lr,
+        )
+
     history = []
 
+    best_metric = float("-inf")
+    best_epoch = 0
+    best_state = clone_state_dict(model)
+    epochs_without_improvement = 0
+    stopped_early = False
+
     # --------------------------------------------------
-    # 10. TRAINING AND EPOCH-WISE MONITORING
+    # 11. TRAINING AND EPOCH-WISE MONITORING
     # --------------------------------------------------
 
     print("\nTRAINING STARTED")
@@ -366,6 +621,8 @@ def main() -> None:
 
         average_train_loss = total_loss / len(train_loader)
 
+        current_lr = optimizer.param_groups[0]["lr"]
+
         # ----------------------------------------------
         # VALIDATION
         # ----------------------------------------------
@@ -385,16 +642,35 @@ def main() -> None:
         val_macro_f1 = val_metrics["macro_f1"]
 
         # ----------------------------------------------
+        # BEST-CHECKPOINT TRACKING
+        # ----------------------------------------------
+
+        is_best = val_macro_f1 > best_metric + args.es_min_delta
+
+        if is_best:
+            best_metric = val_macro_f1
+            best_epoch = epoch
+            best_state = clone_state_dict(model)
+            epochs_without_improvement = 0
+        else:
+            epochs_without_improvement += 1
+
+        if scheduler is not None:
+            scheduler.step(val_macro_f1)
+
+        # ----------------------------------------------
         # SAVE EPOCH METRICS
         # ----------------------------------------------
 
         history.append(
             {
                 "epoch": epoch,
+                "lr": current_lr,
                 "train_loss": average_train_loss,
                 "val_accuracy": val_accuracy,
                 "val_balanced_accuracy": (val_balanced_accuracy),
                 "val_macro_f1": val_macro_f1,
+                "is_best": is_best,
             }
         )
 
@@ -404,54 +680,88 @@ def main() -> None:
 
         print(
             f"Epoch [{epoch}/{args.epochs}] "
+            f"LR: {current_lr:.2e} | "
             f"Train Loss: {average_train_loss:.4f} | "
             f"Val Accuracy: {val_accuracy:.4f} | "
             f"Val Balanced Acc: {val_balanced_accuracy:.4f} | "
             f"Val Macro F1: {val_macro_f1:.4f}"
+            f"{' | best' if is_best else ''}"
         )
 
+        # ----------------------------------------------
+        # EARLY STOPPING
+        # ----------------------------------------------
+
+        if args.early_stopping and should_stop(
+            epoch,
+            epochs_without_improvement,
+            args.es_patience,
+            args.es_min_epochs,
+        ):
+            stopped_early = True
+            print(
+                f"\nEarly stopping at epoch {epoch}: no improvement for "
+                f"{epochs_without_improvement} epochs "
+                f"(patience {args.es_patience})."
+            )
+            break
+
     # --------------------------------------------------
-    # 11. FINAL PATIENT-LEVEL EVALUATION
+    # 12. FINAL PATIENT-LEVEL EVALUATION
     # --------------------------------------------------
 
     print("\n" + "=" * 55)
     print("FINAL PATIENT-LEVEL VALIDATION")
     print("=" * 55)
 
-    final_results = evaluate_patient_level(
+    # Fixed-budget / last-epoch result: the unbiased headline comparison.
+    last_results = evaluate_patient_level(
         model,
         val_loader,
         device,
     )
 
-    final_metrics = calculate_metrics(final_results)
+    last_metrics = calculate_metrics(last_results)
 
-    for patient_id, result in final_results.items():
-        print(
-            f"{patient_id}: Actual={result['label']}, Predicted={result['prediction']}"
-        )
+    # Preserve the final weights before overwriting them with the best state.
+    last_state = clone_state_dict(model)
 
-    print(
-        "\nValidation patients:",
-        len(final_results),
+    # Best-epoch result: restore the best weights before scoring.
+    model.load_state_dict(best_state)
+
+    best_results = evaluate_patient_level(
+        model,
+        val_loader,
+        device,
     )
 
-    print(f"Patient-level accuracy: {final_metrics['accuracy']:.4f}")
+    best_metrics = calculate_metrics(best_results)
 
-    print(f"Patient-level balanced acc.: {final_metrics['balanced_accuracy']:.4f}")
+    print(
+        f"\nLast epoch: {len(history)}"
+        f"{' (early stopped)' if stopped_early else ' (fixed budget)'}"
+    )
 
-    print(f"Patient-level macro F1: {final_metrics['macro_f1']:.4f}")
+    print(f"  accuracy         : {last_metrics['accuracy']:.4f}")
+    print(f"  balanced accuracy: {last_metrics['balanced_accuracy']:.4f}")
+    print(f"  macro F1         : {last_metrics['macro_f1']:.4f}")
 
-    print("\nConfusion matrix (actual rows, predicted columns):")
+    print(f"\nBest epoch: {best_epoch} (macro F1 {best_metric:.4f})")
 
-    print(final_metrics["confusion_matrix"])
+    print(f"  accuracy         : {best_metrics['accuracy']:.4f}")
+    print(f"  balanced accuracy: {best_metrics['balanced_accuracy']:.4f}")
+    print(f"  macro F1         : {best_metrics['macro_f1']:.4f}")
 
-    print("\nClassification report:")
+    print("\nBest-epoch confusion matrix (actual rows, predicted columns):")
 
-    print(final_metrics["classification_report"])
+    print(best_metrics["confusion_matrix"])
+
+    print("\nBest-epoch classification report:")
+
+    print(best_metrics["classification_report"])
 
     # --------------------------------------------------
-    # 12. SAVE RESULTS
+    # 13. SAVE RESULTS
     # --------------------------------------------------
 
     RESULTS_DIR.mkdir(
@@ -466,68 +776,95 @@ def main() -> None:
 
     # Save training history
 
-    training_log_path = RESULTS_DIR / f"training_log_fold_{args.fold}.csv"
+    training_log_path = RESULTS_DIR / f"{args.run_tag}_training_log_fold_{args.fold}.csv"
 
     pd.DataFrame(history).to_csv(
         training_log_path,
         index=False,
     )
 
-    # Save patient predictions
+    # Save patient predictions for both reporting variants
 
-    prediction_rows = []
-
-    for patient_id, result in final_results.items():
-        row = {
-            "patient_id": patient_id,
-            "actual": result["label"],
-            "predicted": result["prediction"],
-        }
-
-        for class_name, probability in zip(
-            CLASS_NAMES,
-            result["probabilities"],
-            strict=True,
-        ):
-            row[f"p_{class_name}"] = probability
-
-        prediction_rows.append(row)
-
-    prediction_path = RESULTS_DIR / f"patient_predictions_fold_{args.fold}.csv"
-
-    pd.DataFrame(prediction_rows).to_csv(
-        prediction_path,
-        index=False,
+    last_prediction_path = (
+        RESULTS_DIR / f"{args.run_tag}_patient_predictions_fold_{args.fold}.csv"
     )
 
-    # Save final-epoch checkpoint
+    best_prediction_path = (
+        RESULTS_DIR / f"{args.run_tag}_best_patient_predictions_fold_{args.fold}.csv"
+    )
 
-    checkpoint_path = CHECKPOINTS_DIR / f"baseline_fold_{args.fold}.pt"
+    write_predictions(last_prediction_path, last_results)
+
+    write_predictions(best_prediction_path, best_results)
+
+    # Shared provenance for both checkpoints
+
+    config = {
+        "run_tag": args.run_tag,
+        "seed": args.seed,
+        "fold": args.fold,
+        "max_epochs": args.epochs,
+        "epochs_completed": len(history),
+        "stopped_early": stopped_early,
+        "best_epoch": best_epoch,
+        "batch_size": args.batch_size,
+        "learning_rate": args.lr,
+        "scheduler": args.scheduler,
+        "lr_factor": args.lr_factor,
+        "lr_patience": args.lr_patience,
+        "min_lr": args.min_lr,
+        "early_stopping": args.early_stopping,
+        "es_patience": args.es_patience,
+        "es_min_delta": args.es_min_delta,
+        "es_min_epochs": args.es_min_epochs,
+        "augment": args.augment,
+        "rotation_degrees": args.rotation_degrees,
+        "translate": args.translate,
+        "brightness": args.brightness,
+        "contrast": args.contrast,
+        "noise_std": args.noise_std,
+        "hflip_prob": args.hflip_prob,
+        "num_classes": len(CLASS_NAMES),
+        "class_names": CLASS_NAMES,
+    }
+
+    # Last-epoch checkpoint: full training state.
+
+    last_checkpoint_path = (
+        CHECKPOINTS_DIR / f"{args.run_tag}_fold_{args.fold}_last.pt"
+    )
 
     torch.save(
         {
             "fold": args.fold,
-            "epochs": args.epochs,
-            "model_state_dict": model.state_dict(),
+            "epoch": len(history),
+            "model_state_dict": last_state,
             "optimizer_state_dict": optimizer.state_dict(),
-            "final_metrics": {
-                "accuracy": final_metrics["accuracy"],
-                "balanced_accuracy": (final_metrics["balanced_accuracy"]),
-                "macro_f1": final_metrics["macro_f1"],
-            },
-            "config": {
-                "seed": SEED,
-                "batch_size": args.batch_size,
-                "learning_rate": args.lr,
-                "num_classes": len(CLASS_NAMES),
-                "class_names": CLASS_NAMES,
-            },
+            "final_metrics": scalar_metrics(last_metrics),
+            "config": config,
         },
-        checkpoint_path,
+        last_checkpoint_path,
+    )
+
+    # Best-epoch checkpoint: weights selected by patient-level macro F1.
+
+    best_checkpoint_path = (
+        CHECKPOINTS_DIR / f"{args.run_tag}_fold_{args.fold}_best.pt"
+    )
+
+    torch.save(
+        {
+            "fold": args.fold,
+            "epoch": best_epoch,
+            "model_state_dict": best_state,
+            "final_metrics": scalar_metrics(best_metrics),
+            "config": config,
+        },
+        best_checkpoint_path,
     )
 
     # --------------------------------------------------
-    # 13. OUTPUT LOCATIONS
+    # 14. OUTPUT LOCATIONS
     # --------------------------------------------------
 
     print("\n" + "=" * 55)
@@ -535,10 +872,10 @@ def main() -> None:
     print("=" * 55)
 
     print("Training log:", training_log_path)
-
-    print("Patient predictions:", prediction_path)
-
-    print("Checkpoint:", checkpoint_path)
+    print("Last predictions:", last_prediction_path)
+    print("Best predictions:", best_prediction_path)
+    print("Last checkpoint:", last_checkpoint_path)
+    print("Best checkpoint:", best_checkpoint_path)
 
     print("\nTraining completed successfully.")
 

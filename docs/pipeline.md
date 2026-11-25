@@ -84,26 +84,44 @@ tracked for convenience.
 ## Stage 6 — Train a fold
 
 ```bash
-cadica-train --fold 1 --epochs 10 --batch-size 16
+cadica-train --fold 1 --epochs 60 --run-tag e2_aug_s42 --no-early-stopping
 ```
 
 The trainer reads the fold manifests, balances classes and patients with a
-`WeightedRandomSampler`, and evaluates at the patient level by averaging frame
-probabilities per patient.
+`WeightedRandomSampler`, augments only the training split, and evaluates at the patient
+level by averaging frame probabilities per patient. The learning rate follows
+`ReduceLROnPlateau` on patient-level macro F1, with optional early stopping.
+
+Two reporting variants are written:
+
+- **last epoch** — the fixed-budget headline (use `--no-early-stopping`);
+- **best epoch** — best macro-F1 weights, restored before scoring (secondary).
 
 - **Inputs:** `data/folds/train_fold_<k>.csv`, `data/folds/val_fold_<k>.csv`
 - **Outputs:**
-  - `results/training_log_fold_<k>.csv`
-  - `results/patient_predictions_fold_<k>.csv`
-  - `checkpoints/baseline_fold_<k>.pt`
+  - `results/<tag>_training_log_fold_<k>.csv`
+  - `results/<tag>_patient_predictions_fold_<k>.csv` (last epoch)
+  - `results/<tag>_best_patient_predictions_fold_<k>.csv` (best epoch)
+  - `checkpoints/<tag>_fold_<k>_last.pt`
+  - `checkpoints/<tag>_fold_<k>_best.pt`
 
 Reported metrics: patient-level accuracy, balanced accuracy, macro F1, confusion matrix,
 and a per-class classification report.
 
+Aggregate all five folds after training:
+
+```bash
+cadica-aggregate --run-tag e2_aug_s42 --variant last
+```
+
+This writes `<tag>_last_per_fold.csv` and `<tag>_last_summary.csv` with mean ± std across
+folds. Use `--variant best` for the early-stopping table.
+
 Equivalent module invocation:
 
 ```bash
-python -m cadica.cli.train --fold 1 --epochs 10
+python -m cadica.cli.train --fold 1 --epochs 60 --no-early-stopping
+python -m cadica.cli.aggregate --run-tag baseline --variant last
 ```
 
 ## Design notes
