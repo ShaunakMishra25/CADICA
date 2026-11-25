@@ -168,6 +168,7 @@ seed-to-seed noise.
 | 2026-11-24 | Reproducible environment at `~/.venvs/cadica` (Python 3.12 via `uv`) because the old project `.venv` on NTFS is corrupted and the system Python 3.14 has no pip | outside the repo | Unblock running experiments | see §9 |
 | 2026-11-24 | Dataset root fallback corrected to the path that exists on this machine (`/run/media/shaunak/...`); `CADICA_DATA_ROOT` still overrides | `src/cadica/config.py` | `learnings.md` known issue 1; otherwise training cannot find metadata or frames | path verified to contain `metadata.xlsx` and `selectedVideos/` |
 | 2026-11-24 | Environment verified: CUDA available, full test suite green, 5-fold smoke run end-to-end, aggregation for both variants | outside the repo | Close environment setup | torch 2.15.0+cu132, torchvision 0.29.2+cu132, RTX 4050 detected; `pytest` 44 passed; ruff clean on `src` and `tests` |
+| 2026-11-25 | Ran E1 (no augmentation) and E2 (augmentation): 5 folds, 60 epochs, seed 42, `num_workers=4`, early stopping off; aggregated `last` and `best` variants | outputs ignored under `results/` and `checkpoints/` | D-008, D-009 | 10 fold runs completed; 5/5 folds aggregated per condition; numbers in §4.1 |
 
 ### Pending changes (not implemented yet)
 
@@ -185,14 +186,63 @@ Add one row per condition actually run. Never overwrite a row; add a new one.
 | ID | Date | Condition | Folds | Seeds | Protocol | Aug | Other | Mean macro F1 | Mean bal. acc. | Notes |
 |---|---|---|---:|---:|---|---|---|---|---|---|
 | E0 | legacy | baseline CNN | 1 | 1 | 25 epochs, last | off | sampler | — | — | not comparable after protocol change |
-| E1 | | no augmentation | 5 | 2 | 60 epochs, last | off | sampler | | | |
-| E2 | | augmentation | 5 | 2 | 60 epochs, last | on | sampler | | | |
+| E1 | 2026-11-25 | no augmentation | 5 | 1 (s42) | 60 epochs, last | off | sampler | 0.411 ± 0.187 | 0.424 ± 0.236 | best-epoch variant 0.650 ± 0.241 |
+| E2 | 2026-11-25 | augmentation | 5 | 1 (s42) | 60 epochs, last | on | sampler | 0.360 ± 0.066 | 0.456 ± 0.135 | best-epoch variant 0.538 ± 0.060 |
 | E3 | | augmentation + ES | 5 | 2 | ES, best ckpt | on | sampler | | | secondary, selection-biased |
 | E4 | | class-weighted loss | 5 | 2 | 60 epochs, last | on | no sampler | | | D-007 |
 | E5 | | sampler + class weights | 5 | 2 | 60 epochs, last | on | both | | | over-correction check |
 | E6 | | horizontal flip | 5 | 2 | 60 epochs, last | on | flip p=0.5 | | | only if D-003 revisited |
 
 Results must be produced by the aggregation script so the numbers are reproducible.
+
+### E1 vs E2 — seed 42 (2026-11-25)
+
+Five folds, 60 epochs, `WeightedRandomSampler`, `--no-early-stopping`. Command:
+`make train-all RUN_TAG=<tag> EPOCHS=60 EXTRA="--no-early-stopping [--no-augment]"`,
+then `cadica-aggregate`.
+
+**Headline — last epoch, fixed budget (unbiased):**
+
+| Metric | E1 no aug | E2 aug | Difference |
+|---|---:|---:|---:|
+| Accuracy | 0.544 ± 0.133 | 0.525 ± 0.068 | −0.019 |
+| Balanced accuracy | 0.424 ± 0.236 | 0.456 ± 0.135 | +0.032 |
+| Macro F1 | 0.411 ± 0.187 | 0.360 ± 0.066 | −0.051 |
+
+**Secondary — best epoch (selection-biased, do not headline):**
+
+| Metric | E1 no aug | E2 aug |
+|---|---:|---:|
+| Accuracy | 0.758 ± 0.146 | 0.642 ± 0.091 |
+| Balanced accuracy | 0.696 ± 0.223 | 0.644 ± 0.080 |
+| Macro F1 | 0.650 ± 0.241 | 0.538 ± 0.060 |
+
+**Per-class recall, last epoch:**
+
+| Class | E1 no aug | E2 aug |
+|---|---:|---:|
+| `<20%` | 0.30 ± 0.45 | **0.00 ± 0.00** |
+| `20-50%` | 0.30 ± 0.45 | 0.80 ± 0.45 |
+| `>70%` | 0.67 ± 0.10 | 0.57 ± 0.12 |
+
+Observations:
+
+- **No evidence that augmentation helps.** The headline macro F1 is lower with
+  augmentation, while balanced accuracy is slightly higher. With five folds and one seed,
+  both differences are inside fold noise.
+- **The differences are not trustworthy yet.** Fold-level macro F1 ranges 0.27–0.72 and
+  per-class recall std reaches 0.45 because each fold has 1–2 minority patients. D-009
+  asks for a second seed before drawing conclusions.
+- **Augmentation did not rescue the rarest class.** `<20%` recall fell to 0 in every fold
+  at the last epoch, despite balanced sampling.
+- **The validation metric is noise-dominated.** Best epochs are scattered between 2 and 20,
+  so 60 epochs trains well past the point where the fold metric looked good. A single
+  patient flipping changes macro F1 by ~0.33 in folds with one minority patient.
+- **Absolute performance is low.** Macro F1 ≈ 0.4 from scratch on 42 patients suggests
+  model capacity/pretraining matters more than augmentation strength.
+
+Next actions: run seed 137 for E1 and E2 before accepting or rejecting augmentation; then
+compare against a class-weighted or focal loss, and a pretrained backbone.
 
 ---
 
